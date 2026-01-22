@@ -22,11 +22,12 @@ app.use(cors({
 // Explicit OPTIONS handler for preflight checks - Removed as it causes PathError in Express 5
 // app.options('*', cors());
 
+// Handle favicon to prevent HTML 404 errors
+app.get('/favicon.ico', (req: express.Request, res: express.Response) => res.status(204).end());
+
 // Wrapper to adapt Vercel handler to Express
 const vercelToExpress = (handler: any) => async (req: express.Request, res: express.Response) => {
-    // Vercel types are compatible with Express types for the most part
-    // but we need to cast or ensure compatibility if strict typing is needed.
-    await handler(req, res);
+    await handler(req as any, res as any);
 };
 
 app.get('/health', (req: express.Request, res: express.Response) => {
