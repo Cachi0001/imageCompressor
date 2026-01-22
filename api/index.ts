@@ -79,17 +79,17 @@ app.post('/api/upload', upload.single('image'), async (req: any, res: any) => {
         const isVideo = req.file.mimetype.startsWith('video/');
 
         if (isVideo) {
-             console.log('[Upload] Processing video...');
-             // Default video format to mp4 if not specified or invalid
-             if (format !== 'webm' && format !== 'mp4') format = 'mp4';
-             
-             const result = await optimizeVideo(req.file.buffer, {
-                 width,
-                 quality,
-                 format: format as any
-             });
-             data = result.data;
-             info = result.info;
+            console.log('[Upload] Processing video...');
+            // Default video format to mp4 if not specified or invalid
+            if (format !== 'webm' && format !== 'mp4') format = 'mp4';
+
+            const result = await optimizeVideo(req.file.buffer, {
+                width,
+                quality,
+                format: format as any
+            });
+            data = result.data;
+            info = result.info;
         } else {
             // Image
             const result = await optimizeImage(req.file.buffer, {
@@ -114,7 +114,7 @@ app.post('/api/upload', upload.single('image'), async (req: any, res: any) => {
             Body: data,
             ContentType: `image/${format}`
         }));
-        
+
         console.log(`[Upload] S3 upload complete for key: ${key}`);
 
         // Construct Public URL
@@ -141,6 +141,11 @@ app.post('/api/upload', upload.single('image'), async (req: any, res: any) => {
     }
 });
 
-app.listen(port, () => {
-    console.log(`Server running on port ${port}`);
-});
+// Only listen if running directly (not in Vercel/Serverless)
+if (process.env.NODE_ENV !== 'production' && require.main === module) {
+    app.listen(port, () => {
+        console.log(`Server running on port ${port}`);
+    });
+}
+
+export default app;
