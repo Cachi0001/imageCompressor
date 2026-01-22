@@ -4,7 +4,6 @@ import optimizeHandler from '../client/api/optimize';
 import monitorHandler from '../client/api/monitor';
 import multer from 'multer';
 import { optimizeImage } from '../client/lib/optimizer';
-import { optimizeVideo } from '../client/lib/video-optimizer';
 import { s3, BUCKET, PUBLIC_URL } from '../client/lib/s3';
 import { PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import * as crypto from 'crypto';
@@ -30,15 +29,15 @@ const vercelToExpress = (handler: any) => async (req: express.Request, res: expr
     await handler(req, res);
 };
 
-app.get('/health', (req, res) => {
+app.get('/health', (req: express.Request, res: express.Response) => {
     res.send('OK');
 });
 
-app.get('/', (req, res) => {
+app.get('/', (req: express.Request, res: express.Response) => {
     res.send('Image Compression Service is Running');
 });
 
-app.get('/api/debug-config', (req, res) => {
+app.get('/api/debug-config', (req: express.Request, res: express.Response) => {
     res.json({
         status: 'ok',
         env: {
@@ -57,7 +56,7 @@ app.get('/monitor', vercelToExpress(monitorHandler));
 app.get('/api/optimize', vercelToExpress(optimizeHandler));
 
 // New: Upload Endpoint
-app.get('/api/upload', (req, res) => {
+app.get('/api/upload', (req: express.Request, res: express.Response) => {
     res.status(405).send('Method Not Allowed. Please use POST to upload images.');
 });
 
@@ -75,31 +74,14 @@ app.post('/api/upload', upload.single('image'), async (req: any, res: any) => {
         let data: Buffer;
         let info: { width: number; height: number; size: number; format: string };
 
-        // Check if Video
-        const isVideo = req.file.mimetype.startsWith('video/');
-
-        if (isVideo) {
-            console.log('[Upload] Processing video...');
-            // Default video format to mp4 if not specified or invalid
-            if (format !== 'webm' && format !== 'mp4') format = 'mp4';
-
-            const result = await optimizeVideo(req.file.buffer, {
-                width,
-                quality,
-                format: format as any
-            });
-            data = result.data;
-            info = result.info;
-        } else {
-            // Image
-            const result = await optimizeImage(req.file.buffer, {
-                width,
-                quality,
-                format: format as any
-            });
-            data = result.data;
-            info = result.info;
-        }
+        // Image optimization only (FFmpeg removed due to Vercel size limits)
+        const result = await optimizeImage(req.file.buffer, {
+            width,
+            quality,
+            format: format as any
+        });
+        data = result.data;
+        info = result.info;
 
         // Generate Key
         const hash = crypto.createHash('md5').update(data).digest('hex');
