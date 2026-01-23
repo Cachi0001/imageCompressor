@@ -1,81 +1,91 @@
 # Image Optimization Service Integration Guide
 
-This guide explains how to integrate the **Global Image Optimization Service** into your application. This service provides on-the-fly image optimization, caching (via S3/R2), and resizing.
+This guide explains how to integrate the **Global Image Optimization Service** into your application. This service provides on-the-fly image optimization, caching (via Cloudflare Edge & R2), and **Direct Uploads** (eliminating Render).
 
 ## 1. Service Endpoint
 
-You should configure the service URL in your environment variables.
+**Primary Endpoint (Cloudflare Worker):**
+Use this for BOTH uploading and displaying images.
 
 ```env
 # .env
-VITE_IMAGE_SERVICE_URL=https://image-compressor-f5lk.onrender.com/api/optimize
+VITE_IMAGE_SERVICE_URL=https://cf-image-worker.sabimage.workers.dev
 ```
 
-*(This is your active Render deployment URL)*
+## 2. Usage (Displaying Images)
 
-## 2. Usage
-
-### A. Constructing URLs Manually
-
+### A. Constructing URLs
 To optimize an image, simply append parameters to the service URL:
 
 ```
-GET /api/optimize?url={SOURCE_IMAGE_URL}&w={WIDTH}&q={QUALITY}&f={FORMAT}&client={CLIENT_ID}
+https://cf-image-worker.sabimage.workers.dev/image?url={SOURCE_IMAGE_URL}&width={WIDTH}&quality={QUALITY}&format={FORMAT}
+```
+
+**Or if using an uploaded file key:**
+```
+https://cf-image-worker.sabimage.workers.dev/image?r2key={KEY}
 ```
 
 | Parameter | Type | Required | Description | Example |
 | :--- | :--- | :--- | :--- | :--- |
 | `url` | string | **Yes** | The full URL of the original image. | `https://example.com/hero.jpg` |
-| `w` | number | No | Target width in pixels. | `800` |
-| `q` | number | No | Quality (1-100) or `lossless`. Default: `80` | `90` |
-| `f` | string | No | Format (`webp`, `avif`, `auto`). Default: `webp` | `avif` |
-| `client` | string | No | Client ID for isolation/analytics. | `musefactory` |
+| `r2key` | string | **Yes (alt)**| The Key returned from `/upload`. | `default/17000-abc.jpg` |
+| `width` | number | No | Target width in pixels. | `800` |
+| `quality` | number | No | Quality (1-100). Default: `80` | `90` |
+| `format` | string | No | Format (`webp`, `avif`, `jpeg`, `png`). Default: `webp` | `avif` |
 
 **Example:**
+```html
+<img src="https://cf-image-worker.sabimage.workers.dev/image?url=https%3A%2F%2Fmysite.com%2Fimg.jpg&width=1200&format=webp" />
 ```
-https://image-compressor-f5lk.onrender.com/api/optimize?url=https%3A%2F%2Fmysite.com%2Fimg.jpg&w=1200&f=webp&client=teemplot
-```
 
-### B. Direct File Upload (Images & Video)
+## 3. Uploading Files (Direct to Cloudflare)
 
-If you need to upload a file directly from the user's device (e.g., `<input type="file" />`), use the Upload Endpoint.
+We now support **Direct Uploads** to Cloudflare R2 via the Worker. This eliminates the slow Render server.
 
-**Endpoint:** `POST /api/upload`
+**Endpoint:** `POST https://cf-image-worker.sabimage.workers.dev/upload`
 
 **Body (FormData):**
-*   `image`: The file object (binary). Supports **Images** (jpg, png, webp) and **Videos** (mp4, webm, mov).
+*   `image`: The file object (binary).
 *   `client`: Client ID (e.g., `teemplot`).
-*   `w`: Target width (optional).
-*   `q`: Quality (optional).
-*   `f`: Format (optional).
 
-**Video Note:** Videos are automatically compressed to MP4 (h.264) or WebM (vp9) based on the `f` parameter.
+**Response (JSON):**
+```json
+{
+  "key": "teemplot/1739832-ab12.jpg",
+  "url": "https://cf-image-worker.sabimage.workers.dev/image?r2key=teemplot%2F1739832-ab12.jpg"
+}
+```
 
-**Example Code (React):**
+**Example Code (Frontend):**
 
 ```typescript
 const handleUpload = async (file: File) => {
   const formData = new FormData();
   formData.append('image', file);
   formData.append('client', 'teemplot');
-  formData.append('w', '800');
 
-  const response = await fetch('https://image-compressor-f5lk.onrender.com/api/upload', {
+  const response = await fetch('https://cf-image-worker.sabimage.workers.dev/upload', {
     method: 'POST',
     body: formData
   });
 
   const data = await response.json();
-  console.log('Optimized File URL:', data.url);
+  console.log('Use this URL:', data.url);
   return data.url;
 };
 ```
 
-### C. Deleting Files
+**Why this is better:**
+*   **No Cold Starts:** Workers wake up in < 10ms. Render takes 10s+.
+*   **Direct Storage:** File goes straight to R2.
+*   **Secure:** No API keys exposed on the client.
+
+## 4. Deleting Files
 
 To delete a file (image or video) to free up storage, send a DELETE request.
 
-**Endpoint:** `DELETE /api/delete`
+**Endpoint:** `DELETE https://cf-image-worker.sabimage.workers.dev/delete`
 
 **Body (JSON):**
 ```json
@@ -83,83 +93,39 @@ To delete a file (image or video) to free up storage, send a DELETE request.
   "key": "client/hash.webp"
 }
 ```
-*OR*
-```json
-{
-  "url": "https://pub-xxx.r2.dev/client/hash.webp"
-}
-```
 
 **Example Code:**
 ```typescript
-await fetch('https://image-compressor-f5lk.onrender.com/api/delete', {
-  method: 'DELETE',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ url: 'https://...' })
-});
+const deleteImage = async (key: string) => {
+  const response = await fetch('https://cf-image-worker.sabimage.workers.dev/delete', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key })
+  });
+  
+  if (!response.ok) throw new Error('Delete failed');
+  return true;
+};
 ```
 
-### D. Using the Helper Utility (Recommended for URLs)
+## 5. Client IDs & Analytics
 
-Copy the `image-optimizer.ts` (or `image-loader.ts`) file into your project's `src/lib` directory.
-
-**Usage in React/Vue/TS:**
-
-```typescript
-import { getOptimizedUrl } from '@/lib/image-optimizer';
-
-// In your component
-const myImage = getOptimizedUrl({
-  src: 'https://example.com/banner.png',
-  width: 1200,
-  quality: 90,
-  format: 'avif'
-});
-
-return <img src={myImage} alt="Banner" />;
-```
-
-## 3. Client IDs
-
-Use the appropriate `client` parameter for your project to ensure analytics and storage isolation work correctly:
+Use the appropriate `client` parameter for your project to ensure analytics isolation:
 
 *   **MuseFactory**: `musefactory`
-*   **Teemplot**: `teemplot` (or `client-a`)
-*   **UGlobalHorizons**: `uglobalhorizons` (or `client-b`)
+*   **Teemplot**: `teemplot`
+*   **UGlobalHorizons**: `uglobalhorizons`
 
-## 4. Under the Hood: How It Works
+## 6. Troubleshooting
 
-This section details the internal logic of the service for debugging and understanding performance.
+*   **404 Not Found**: Check if the source `url` parameter is correct.
+*   **500 Upload Failed**: Check if the Worker has the correct R2 binding (`IMG_CACHE`).
 
-### A. Compression Logic
-The service uses **Sharp**, a high-performance Node.js image processing library.
+## 7. Deployment (Cloudflare Workers)
 
-1.  **Input**: Accepts raw binary data (Buffer) from a URL fetch or Direct Upload.
-2.  **Pipeline**:
-    *   **Resizing**: If `w` (width) is provided, the image is resized maintaining aspect ratio.
-    *   **Format Conversion**: Converts the image to the requested format (default `webp`). WebP is chosen for its superior compression-to-quality ratio (typically 30% smaller than JPEG).
-    *   **Optimization**: Applies lossy compression based on the `q` (quality) parameter (default `80`). This removes invisible visual data to save space.
-3.  **Output**: Returns a Buffer of the optimized image and metadata (width, height, size).
+### Deployment Steps
+1.  **Login**: `npx wrangler login`
+2.  **Deploy**: `npx wrangler deploy`
 
-### B. Storage & Caching Strategy
-To avoid re-processing the same image multiple times, we use a content-addressable storage strategy.
-
-1.  **Hashing**: Before uploading, we generate an **MD5 hash** of the *optimized* image data.
-2.  **Key Generation**: The storage key (path) is constructed as:
-    `{CLIENT_ID}/{HASH}.{FORMAT}`
-    *   *Example*: `teemplot/a1b2c3d4e5...99.webp`
-3.  **Deduplication**: If two different users upload the exact same image (pixel-for-pixel identical after optimization), they will generate the same hash and share the same storage file, saving space.
-4.  **Storage Provider**: Files are uploaded to **Cloudflare R2** (using the AWS S3 SDK). R2 provides global distribution and zero egress fees.
-
-### C. Encoding & Parameters
-*   **Encoding**: Images are processed in memory as Buffers. We do not write temporary files to disk, which keeps the service fast and stateless (friendly for Serverless/Render).
-*   **Parameter Explanation**:
-    *   `w` (Width): Controls the resolution. Smaller width = smaller file size. Use this to match the display size on the client (e.g., don't serve a 4000px image for a 300px card).
-    *   `q` (Quality): Controls the compression level. 80 is "High Quality" (visually lossless). 60 is "Medium" (good for thumbnails). 100 is "Max" (large file size).
-    *   `f` (Format): `webp` is supported by all modern browsers. `avif` offers even better compression but is slower to encode.
-
-## 5. Troubleshooting
-
-*   **net::ERR_NAME_NOT_RESOLVED**: This usually means the `S3_PUBLIC_URL` environment variable is missing or incorrect. The service is trying to guess the URL but failing for R2. Ensure your Render Environment Variables include the public URL of your bucket.
-*   **400 Invalid URL**: Ensure the `url` parameter is a valid, publicly accessible URL.
-*   **Images not updating**: The service caches heavily. Change the `q` or `w` slightly to force a re-optimization if you changed the source image but kept the URL the same.
+Config is located in `workers/cf-image-worker/wrangler.toml`.
+Source code is in `workers/cf-image-worker/src/index.ts`.

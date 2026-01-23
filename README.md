@@ -1,6 +1,6 @@
 # Global Image Optimization Service
 
-A high-performance, centralized image optimization microservice designed to serve multiple websites (including MuseFactory). It deploys to Vercel and handles on-the-fly compression, resizing, and storage to your own S3 bucket.
+A high-performance, centralized image optimization microservice designed to serve multiple websites. It uses **Cloudflare Workers** for fast edge delivery and a Node.js backend for file uploads.
 
 ## Architecture
 
@@ -8,65 +8,42 @@ This service acts as a centralized "Image CDN". All your websites (Clients) poin
 
 ```mermaid
 graph LR
-    ClientA[Website A] -->|Request Image| Service[Image Optimization Service (Vercel)]
-    ClientB[MuseFactory] -->|Request Image| Service
-    Service -->|Check Cache| S3[S3 Bucket]
-    Service -->|If Miss: Optimize| Sharp[Sharp Engine]
-    Sharp -->|Save| S3
-    S3 -->|Return Image| ClientA
-    S3 -->|Return Image| ClientB
+    ClientA[Website A] -->|Fetch Optimized| Worker[Cloudflare Worker (Edge)]
+    ClientB[MuseFactory] -->|Upload File| NodeApp[Node Upload Service (Render)]
+    Worker -->|Resize & Cache| R2[Cloudflare R2 Storage]
+    NodeApp -->|Save Original| R2
+    Worker -->|Return WebP/AVIF| ClientA
 ```
+
+## Quick Links
+
+*   **Integration Guide**: [client/INTEGRATION_GUIDE.md](client/INTEGRATION_GUIDE.md) - **Start Here**
+*   **Worker Deployment**: [workers/cf-image-worker/DEPLOY.md](workers/cf-image-worker/DEPLOY.md)
+*   **Worker Source**: [workers/cf-image-worker/](workers/cf-image-worker/)
+
+## Services
+
+### 1. Delivery Service (Cloudflare Worker)
+*   **URL**: `https://cf-image-worker.sabimage.workers.dev`
+*   **Purpose**: Fetches, resizes, and compresses images on the fly at the edge.
+*   **Latency**: < 100ms globally (cached).
+
+### 2. Upload Service (Node.js/Express)
+*   **URL**: `https://image-compressor-f5lk.onrender.com/api/upload`
+*   **Purpose**: Handles file uploads (multipart/form-data) from admin panels.
+*   **Storage**: Saves files to R2 bucket `my-images`.
 
 ## Deployment
 
-This entire repository is the service. You deploy this ONCE to Vercel, and all your other projects use the URL it generates.
+### A. Deploy the Worker (Fast Delivery)
+See [workers/cf-image-worker/DEPLOY.md](workers/cf-image-worker/DEPLOY.md).
 
-1.  **Deploy to Vercel**:
-    Run the following command from the root directory:
-    ```bash
-    vercel
-    ```
-
-2.  **Environment Variables (Vercel)**:
-    Set these in your Vercel Project Settings:
-    *   `S3_BUCKET`: Your bucket name
-    *   `S3_REGION`: e.g., us-east-1
-    *   `S3_ACCESS_KEY_ID`: AWS Access Key
-    *   `S3_SECRET_ACCESS_KEY`: AWS Secret Key
-    *   `EMAIL_HOST`: smtp.gmail.com
-    *   `EMAIL_USER`: your-email@gmail.com
-    *   `EMAIL_PASS`: your-app-password
-
-## Client Integration
-
-### 1. MuseFactory (and other websites)
-
-In your frontend code (Next.js, React, Vue, etc.), do not upload images directly to Cloudinary. Instead, upload to this service or request optimized versions.
-
-**To Optimize an External URL:**
-```javascript
-const SERVICE_URL = "https://your-image-service.vercel.app";
-const originalImage = "https://some-source.com/image.jpg";
-
-// Request optimized WebP version
-const optimizedSrc = `${SERVICE_URL}/upload?url=${encodeURIComponent(originalImage)}&width=800&format=webp`;
+```bash
+cd workers/cf-image-worker
+npx wrangler login
+npx wrangler deploy
 ```
 
-**To Upload Directly:**
-```javascript
-const formData = new FormData();
-formData.append('image', fileInput.files[0]);
-formData.append('width', '1920');
-formData.append('quality', 'auto:good');
-
-const response = await fetch('https://your-image-service.vercel.app/upload', {
-  method: 'POST',
-  body: formData
-});
-const data = await response.json();
-console.log(data.secureUrl); // URL of the optimized image in S3
-```
-
-## Migration
-
-If you have existing images in Cloudinary for MuseFactory, use the migration script in `musefactory/scripts/migrate.ts` (documented in `musefactory/README.md`) to pull them into this new S3 bucket.
+### B. Deploy the Upload Service (Backend)
+This is a standard Node.js app deployable to Render/Vercel.
+*   Ensure environment variables `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET` (my-images), and `S3_ENDPOINT` are set.

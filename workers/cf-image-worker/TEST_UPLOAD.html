@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Image Upload</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 600px; margin: 40px auto; padding: 20px; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input, button { padding: 8px; font-size: 16px; }
+        button { background: #0070f3; color: white; border: none; cursor: pointer; border-radius: 4px; }
+        button:hover { background: #0051a2; }
+        #result { margin-top: 20px; padding: 15px; background: #f0f0f0; border-radius: 4px; white-space: pre-wrap; display: none; }
+        #preview { margin-top: 20px; max-width: 100%; border: 1px solid #ddd; display: none; }
+    </style>
+</head>
+<body>
+    <h1>Test Worker Upload</h1>
+    <p>Upload an image directly to your Cloudflare Worker.</p>
+    
+    <form id="uploadForm">
+        <div class="form-group">
+            <label>Select Image:</label>
+            <input type="file" name="image" accept="image/*" required />
+        </div>
+        <div class="form-group">
+            <label>Client ID:</label>
+            <input type="text" name="client" value="test-client" />
+        </div>
+        <button type="submit">Upload Now</button>
+    </form>
+
+    <div id="result"></div>
+    <h3>Preview (from Worker):</h3>
+    <img id="preview" alt="Upload preview" />
+
+    <script>
+        document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData(e.target);
+            const resultDiv = document.getElementById('result');
+            const previewImg = document.getElementById('preview');
+            const btn = e.target.querySelector('button');
+            
+            btn.disabled = true;
+            btn.textContent = 'Uploading...';
+            resultDiv.style.display = 'block';
+            resultDiv.textContent = 'Sending request to Cloudflare...';
+            previewImg.style.display = 'none';
+
+            try {
+                // Use the newly deployed Worker URL
+                const response = await fetch('https://cf-image-worker.sabimage.workers.dev/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const text = await response.text();
+                try {
+                    const data = JSON.parse(text);
+                    resultDiv.textContent = 'Success! Response:\n' + JSON.stringify(data, null, 2);
+                    
+                    if (data.url) {
+                        previewImg.src = data.url;
+                        previewImg.style.display = 'block';
+                    }
+                } catch {
+                    resultDiv.textContent = 'Server Error (Not JSON):\n' + text;
+                }
+            } catch (err) {
+                resultDiv.textContent = 'Network Error: ' + err.message;
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Upload Now';
+            }
+        });
+    </script>
+</body>
+</html>
