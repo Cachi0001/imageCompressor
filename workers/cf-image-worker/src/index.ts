@@ -94,6 +94,37 @@ export default {
 
     const url = new URL(req.url)
 
+    const streamFromR2FirstMatch = async (candidateKeys: string[]): Promise<Response> => {
+      if (!env.IMG_CACHE) {
+        return new Response('R2 binding IMG_CACHE not set', { status: 500, headers: makeHeaders('text/plain', 0) })
+      }
+
+      const range = parseRangeHeader(req.headers.get('Range'))
+      for (const candidate of candidateKeys) {
+        const key = normalizeR2Key(candidate)
+        const obj = await env.IMG_CACHE.get(key, range ? { range } : undefined)
+        if (!obj) continue
+
+        const contentType = obj.httpMetadata?.contentType || 'application/octet-stream'
+        const headers = makeHeaders(contentType, 60 * 60 * 24 * 30)
+        headers.set('Accept-Ranges', 'bytes')
+
+        if (range && obj.size !== undefined) {
+          const start = range.offset
+          const end = range.length ? start + range.length - 1 : obj.size - 1
+          headers.set('Content-Range', `bytes ${start}-${end}/${obj.size}`)
+          if (range.length) headers.set('Content-Length', String(range.length))
+          if (req.method === 'HEAD') return new Response(null, { status: 206, headers })
+          return new Response(obj.body as ReadableStream, { status: 206, headers })
+        }
+
+        if (req.method === 'HEAD') return new Response(null, { headers })
+        return new Response(obj.body as ReadableStream, { headers })
+      }
+
+      return new Response('R2 Object Not Found', { status: 404, headers: makeHeaders('text/plain', 0) })
+    }
+
     const streamFromR2 = async (keyRaw: string): Promise<Response> => {
       if (!env.IMG_CACHE) {
         return new Response('R2 binding IMG_CACHE not set', { status: 500, headers: makeHeaders('text/plain', 0) })
@@ -194,8 +225,10 @@ export default {
     if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname.startsWith('/api/videos/')) {
       const keyPart = url.pathname.slice('/api/videos/'.length)
       const normalized = normalizeR2Key(keyPart)
-      const key = normalized.includes('/') ? normalized : `videos/${normalized}`
-      return streamFromR2(key)
+      if (normalized.includes('/')) {
+        return streamFromR2(normalized)
+      }
+      return streamFromR2FirstMatch([`videos/${normalized}`, `files/${normalized}`, normalized])
     }
 
     // PUT /api/videos/<key> -> store raw bytes to R2 (streaming; supports 500MB+ reliably)
