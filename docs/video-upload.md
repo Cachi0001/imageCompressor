@@ -44,7 +44,9 @@ This document explains how video uploads are handled across the platform, curren
   - `main = "src/index.ts"`
   - `compatibility_date = "2025-12-01"`
   - `vars`: `DEFAULT_QUALITY`, `DEFAULT_FORMAT`, `USE_R2_CACHE`, `MAX_WIDTH`, `MAX_HEIGHT`, etc.
-  - `r2_buckets`: binding `IMG_CACHE` to bucket `my-images`
+  - `r2_buckets`:
+    - `IMG_CACHE` → `my-images` (images/files)
+    - `VID_CACHE` → `sabimage-videos` (videos)
 
 ## Known Failure Scenarios
 - Uploads ≥100MB via Express:

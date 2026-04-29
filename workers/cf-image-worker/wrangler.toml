@@ -22,3 +22,7 @@ MAX_HEIGHT = "2048"
 [[r2_buckets]]
 binding = "IMG_CACHE"
 bucket_name = "my-images"
+
+[[r2_buckets]]
+binding = "VID_CACHE"
+bucket_name = "sabimage-videos"

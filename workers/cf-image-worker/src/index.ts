@@ -1,5 +1,6 @@
 export interface Env {
   IMG_CACHE?: R2Bucket
+  VID_CACHE?: R2Bucket
   ALLOWED_HOSTS?: string
   DEFAULT_QUALITY?: string
   DEFAULT_FORMAT?: string
@@ -94,32 +95,30 @@ export default {
 
     const url = new URL(req.url)
 
-    const streamFromR2FirstMatch = async (candidateKeys: string[]): Promise<Response> => {
-      if (!env.IMG_CACHE) {
-        return new Response('R2 binding IMG_CACHE not set', { status: 500, headers: makeHeaders('text/plain', 0) })
-      }
-
+    const streamFromR2FirstMatch = async (candidateKeys: string[], buckets: R2Bucket[]): Promise<Response> => {
       const range = parseRangeHeader(req.headers.get('Range'))
-      for (const candidate of candidateKeys) {
-        const key = normalizeR2Key(candidate)
-        const obj = await env.IMG_CACHE.get(key, range ? { range } : undefined)
-        if (!obj) continue
+      for (const bucket of buckets) {
+        for (const candidate of candidateKeys) {
+          const key = normalizeR2Key(candidate)
+          const obj = await bucket.get(key, range ? { range } : undefined)
+          if (!obj) continue
 
-        const contentType = obj.httpMetadata?.contentType || 'application/octet-stream'
-        const headers = makeHeaders(contentType, 60 * 60 * 24 * 30)
-        headers.set('Accept-Ranges', 'bytes')
+          const contentType = obj.httpMetadata?.contentType || 'application/octet-stream'
+          const headers = makeHeaders(contentType, 60 * 60 * 24 * 30)
+          headers.set('Accept-Ranges', 'bytes')
 
-        if (range && obj.size !== undefined) {
-          const start = range.offset
-          const end = range.length ? start + range.length - 1 : obj.size - 1
-          headers.set('Content-Range', `bytes ${start}-${end}/${obj.size}`)
-          if (range.length) headers.set('Content-Length', String(range.length))
-          if (req.method === 'HEAD') return new Response(null, { status: 206, headers })
-          return new Response(obj.body as ReadableStream, { status: 206, headers })
+          if (range && obj.size !== undefined) {
+            const start = range.offset
+            const end = range.length ? start + range.length - 1 : obj.size - 1
+            headers.set('Content-Range', `bytes ${start}-${end}/${obj.size}`)
+            if (range.length) headers.set('Content-Length', String(range.length))
+            if (req.method === 'HEAD') return new Response(null, { status: 206, headers })
+            return new Response(obj.body as ReadableStream, { status: 206, headers })
+          }
+
+          if (req.method === 'HEAD') return new Response(null, { headers })
+          return new Response(obj.body as ReadableStream, { headers })
         }
-
-        if (req.method === 'HEAD') return new Response(null, { headers })
-        return new Response(obj.body as ReadableStream, { headers })
       }
 
       return new Response('R2 Object Not Found', { status: 404, headers: makeHeaders('text/plain', 0) })
@@ -132,38 +131,16 @@ export default {
 
       const key = normalizeR2Key(keyRaw)
       const range = parseRangeHeader(req.headers.get('Range'))
-      const obj = await env.IMG_CACHE.get(key, range ? { range } : undefined)
-      if (!obj) {
-        return new Response('R2 Object Not Found', { status: 404, headers: makeHeaders('text/plain', 0) })
-      }
-
-      const contentType = obj.httpMetadata?.contentType || 'application/octet-stream'
-      const headers = makeHeaders(contentType, 60 * 60 * 24 * 30)
-      headers.set('Accept-Ranges', 'bytes')
-
-      if (range && obj.size !== undefined) {
-        const start = range.offset
-        const end = range.length ? start + range.length - 1 : obj.size - 1
-        headers.set('Content-Range', `bytes ${start}-${end}/${obj.size}`)
-        if (range.length) headers.set('Content-Length', String(range.length))
-        if (req.method === 'HEAD') return new Response(null, { status: 206, headers })
-        return new Response(obj.body as ReadableStream, { status: 206, headers })
-      }
-
-      if (req.method === 'HEAD') return new Response(null, { headers })
-      return new Response(obj.body as ReadableStream, { headers })
+      return streamFromR2FirstMatch([key], [env.IMG_CACHE])
     }
 
-    const putToR2 = async (keyRaw: string): Promise<Response> => {
-      if (!env.IMG_CACHE) {
-        return new Response('R2 binding IMG_CACHE not set', { status: 500, headers: makeHeaders('text/plain', 0) })
-      }
+    const putToR2 = async (keyRaw: string, bucket: R2Bucket): Promise<Response> => {
       const key = normalizeR2Key(keyRaw)
       if (!req.body) {
         return new Response('Missing request body', { status: 400, headers: makeHeaders('text/plain', 0) })
       }
       const contentType = req.headers.get('Content-Type') || 'application/octet-stream'
-      await env.IMG_CACHE.put(key, req.body, { httpMetadata: { contentType } })
+      await bucket.put(key, req.body, { httpMetadata: { contentType } })
       return new Response(
         JSON.stringify({
           key,
@@ -225,24 +202,94 @@ export default {
     if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname.startsWith('/api/videos/')) {
       const keyPart = url.pathname.slice('/api/videos/'.length)
       const normalized = normalizeR2Key(keyPart)
-      if (normalized.includes('/')) {
-        return streamFromR2(normalized)
+      const buckets: R2Bucket[] = []
+      if (env.VID_CACHE) buckets.push(env.VID_CACHE)
+      if (env.IMG_CACHE) buckets.push(env.IMG_CACHE)
+      if (buckets.length === 0) {
+        return new Response('R2 binding IMG_CACHE not set', { status: 500, headers: makeHeaders('text/plain', 0) })
       }
-      return streamFromR2FirstMatch([`videos/${normalized}`, `files/${normalized}`, normalized])
+      if (normalized.includes('/')) {
+        return streamFromR2FirstMatch([normalized], buckets)
+      }
+      return streamFromR2FirstMatch([`videos/${normalized}`, `files/${normalized}`, normalized], buckets)
     }
 
     // PUT /api/videos/<key> -> store raw bytes to R2 (streaming; supports 500MB+ reliably)
     if (req.method === 'PUT' && url.pathname.startsWith('/api/videos/')) {
+      const bucket = env.VID_CACHE ?? env.IMG_CACHE
+      if (!bucket) {
+        return new Response('R2 binding IMG_CACHE not set', { status: 500, headers: makeHeaders('text/plain', 0) })
+      }
       const keyPart = url.pathname.slice('/api/videos/'.length)
       const normalized = normalizeR2Key(keyPart)
       const key = normalized.includes('/') ? normalized : `videos/${normalized}`
-      return putToR2(key)
+      return putToR2(key, bucket)
     }
 
     // PUT /api/files/<key> -> store raw bytes to R2 (streaming)
     if (req.method === 'PUT' && url.pathname.startsWith('/api/files/')) {
+      if (!env.IMG_CACHE) {
+        return new Response('R2 binding IMG_CACHE not set', { status: 500, headers: makeHeaders('text/plain', 0) })
+      }
       const keyPart = url.pathname.slice('/api/files/'.length)
-      return putToR2(keyPart)
+      return putToR2(keyPart, env.IMG_CACHE)
+    }
+
+    // POST /api/videos -> multipart upload, stores under videos/<uuid>.<ext>
+    if (req.method === 'POST' && url.pathname === '/api/videos') {
+      const bucket = env.VID_CACHE ?? env.IMG_CACHE
+      if (!bucket) {
+        return new Response('R2 binding IMG_CACHE not set', { status: 500, headers: makeHeaders('text/plain', 0) })
+      }
+      try {
+        const formData = await req.formData()
+        const fileEntry = formData.get('file') || formData.get('video') || formData.get('image')
+        const file = fileEntry as unknown as File | null
+        if (!file) {
+          return new Response('No file provided', { status: 400, headers: makeHeaders('text/plain', 0) })
+        }
+        const ext = file.name.split('.').pop() || 'bin'
+        const name = `${crypto.randomUUID()}.${ext}`
+        const key = `videos/${name}`
+        await bucket.put(key, file.stream(), { httpMetadata: { contentType: file.type } })
+        return new Response(
+          JSON.stringify({
+            key,
+            url: `${url.origin}/api/videos/${name}`,
+          }),
+          { headers: makeHeaders('application/json', 0) },
+        )
+      } catch (err: any) {
+        return new Response(`Upload failed: ${err.message}`, { status: 500, headers: makeHeaders('text/plain', 0) })
+      }
+    }
+
+    // POST /api/files -> multipart upload, stores under files/<uuid>.<ext>, returns /api/files/<encodedKey>
+    if (req.method === 'POST' && url.pathname === '/api/files') {
+      if (!env.IMG_CACHE) {
+        return new Response('R2 binding IMG_CACHE not set', { status: 500, headers: makeHeaders('text/plain', 0) })
+      }
+      try {
+        const formData = await req.formData()
+        const fileEntry = formData.get('file') || formData.get('image')
+        const file = fileEntry as unknown as File | null
+        if (!file) {
+          return new Response('No file provided', { status: 400, headers: makeHeaders('text/plain', 0) })
+        }
+        const ext = file.name.split('.').pop() || 'bin'
+        const key = `files/${crypto.randomUUID()}.${ext}`
+        await env.IMG_CACHE.put(key, file.stream(), { httpMetadata: { contentType: file.type } })
+        const encodedKey = encodeURIComponent(key)
+        return new Response(
+          JSON.stringify({
+            key,
+            url: `${url.origin}/api/files/${encodedKey}`,
+          }),
+          { headers: makeHeaders('application/json', 0) },
+        )
+      } catch (err: any) {
+        return new Response(`Upload failed: ${err.message}`, { status: 500, headers: makeHeaders('text/plain', 0) })
+      }
     }
 
     // === Delete Endpoint ===
@@ -300,7 +347,13 @@ export default {
 
     if (r2key) {
       const key = normalizeR2Key(r2key)
-      const resp = await streamFromR2(key)
+      const buckets: R2Bucket[] = []
+      if (env.IMG_CACHE) buckets.push(env.IMG_CACHE)
+      if (env.VID_CACHE) buckets.push(env.VID_CACHE)
+      if (buckets.length === 0) {
+        return new Response('R2 binding IMG_CACHE not set', { status: 500, headers: makeHeaders('text/plain', 0) })
+      }
+      const resp = await streamFromR2FirstMatch([key], buckets)
       if (!resp.ok) return resp
 
       const ct = resp.headers.get('Content-Type') || ''
