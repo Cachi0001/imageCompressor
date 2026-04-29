@@ -1,131 +1,84 @@
-# Image Optimization Service Integration Guide
+# Global Image Service API Reference
 
-This guide explains how to integrate the **Global Image Optimization Service** into your application. This service provides on-the-fly image optimization, caching (via Cloudflare Edge & R2), and **Direct Uploads** (eliminating Render).
+This document defines the **Universal API** for the Image Optimization Service.
+Any application (Web, Mobile, Backend) can use these endpoints to upload, retrieve, and delete images.
 
-## 1. Service Endpoint
+**Base URL:**
+`https://cf-image-worker.sabimage.workers.dev`
 
-**Primary Endpoint (Cloudflare Worker):**
-Use this for BOTH uploading and displaying images.
+---
 
-```env
-# .env
-VITE_IMAGE_SERVICE_URL=https://cf-image-worker.sabimage.workers.dev
+## 1. Upload Image (POST)
+Uploads a file directly to Cloudflare R2 storage.
+
+**Endpoint:** `POST /upload`
+**Content-Type:** `multipart/form-data`
+
+### Parameters
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `image` | File | **Yes** | The binary file to upload. |
+| `client` | String | **Yes** | Client ID (e.g., `musefactory`, `teemplot`). |
+
+### Example Request (cURL)
+```bash
+curl -X POST -F "image=@photo.jpg" -F "client=musefactory" https://cf-image-worker.sabimage.workers.dev/upload
 ```
 
-## 2. Usage (Displaying Images)
-
-### A. Constructing URLs
-To optimize an image, simply append parameters to the service URL:
-
-```
-https://cf-image-worker.sabimage.workers.dev/image?url={SOURCE_IMAGE_URL}&width={WIDTH}&quality={QUALITY}&format={FORMAT}
-```
-
-**Or if using an uploaded file key:**
-```
-https://cf-image-worker.sabimage.workers.dev/image?r2key={KEY}
-```
-
-| Parameter | Type | Required | Description | Example |
-| :--- | :--- | :--- | :--- | :--- |
-| `url` | string | **Yes** | The full URL of the original image. | `https://example.com/hero.jpg` |
-| `r2key` | string | **Yes (alt)**| The Key returned from `/upload`. | `default/17000-abc.jpg` |
-| `width` | number | No | Target width in pixels. | `800` |
-| `quality` | number | No | Quality (1-100). Default: `80` | `90` |
-| `format` | string | No | Format (`webp`, `avif`, `jpeg`, `png`). Default: `webp` | `avif` |
-
-**Example:**
-```html
-<img src="https://cf-image-worker.sabimage.workers.dev/image?url=https%3A%2F%2Fmysite.com%2Fimg.jpg&width=1200&format=webp" />
-```
-
-## 3. Uploading Files (Direct to Cloudflare)
-
-We now support **Direct Uploads** to Cloudflare R2 via the Worker. This eliminates the slow Render server.
-
-**Endpoint:** `POST https://cf-image-worker.sabimage.workers.dev/upload`
-
-**Body (FormData):**
-*   `image`: The file object (binary).
-*   `client`: Client ID (e.g., `teemplot`).
-
-**Response (JSON):**
+### Example Response (JSON)
 ```json
 {
-  "key": "teemplot/1739832-ab12.jpg",
-  "url": "https://cf-image-worker.sabimage.workers.dev/image?r2key=teemplot%2F1739832-ab12.jpg"
+  "key": "musefactory/17000000-abc.jpg",
+  "url": "https://cf-image-worker.sabimage.workers.dev/image?r2key=musefactory%2F17000000-abc.jpg"
 }
 ```
 
-**Example Code (Frontend):**
+---
 
-```typescript
-const handleUpload = async (file: File) => {
-  const formData = new FormData();
-  formData.append('image', file);
-  formData.append('client', 'teemplot');
+## 2. Get/Optimize Image (GET)
+Retrieves an image, optionally resizing and compressing it on the fly.
 
-  const response = await fetch('https://cf-image-worker.sabimage.workers.dev/upload', {
-    method: 'POST',
-    body: formData
-  });
+**Endpoint:** `GET /image`
 
-  const data = await response.json();
-  console.log('Use this URL:', data.url);
-  return data.url;
-};
+### Parameters
+| Parameter | Required | Description | Example |
+| :--- | :--- | :--- | :--- |
+| `url` | Yes* | Full URL of source image. | `https://site.com/img.jpg` |
+| `r2key` | Yes* | Key from `/upload` (Alternative to `url`). | `musefactory/abc.jpg` |
+| `width` | No | Target width (px). | `800` |
+| `quality` | No | Compression quality (1-100). | `80` |
+| `format` | No | `webp`, `avif`, `jpeg`, `png`. | `webp` |
+
+*\*Either `url` OR `r2key` must be provided.*
+
+### Example Request
+```
+GET https://cf-image-worker.sabimage.workers.dev/image?r2key=musefactory/abc.jpg&width=400&format=webp
 ```
 
-**Why this is better:**
-*   **No Cold Starts:** Workers wake up in < 10ms. Render takes 10s+.
-*   **Direct Storage:** File goes straight to R2.
-*   **Secure:** No API keys exposed on the client.
+---
 
-## 4. Deleting Files
+## 3. Delete Image (DELETE)
+Permanently removes an image from storage.
 
-To delete a file (image or video) to free up storage, send a DELETE request.
+**Endpoint:** `DELETE /delete`
+**Content-Type:** `application/json`
 
-**Endpoint:** `DELETE https://cf-image-worker.sabimage.workers.dev/delete`
-
-**Body (JSON):**
+### Body
 ```json
 {
-  "key": "client/hash.webp"
+  "key": "musefactory/17000000-abc.jpg"
 }
 ```
 
-**Example Code:**
-```typescript
-const deleteImage = async (key: string) => {
-  const response = await fetch('https://cf-image-worker.sabimage.workers.dev/delete', {
-    method: 'DELETE',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ key })
-  });
-  
-  if (!response.ok) throw new Error('Delete failed');
-  return true;
-};
+### Example Request (cURL)
+```bash
+curl -X DELETE -d '{"key":"musefactory/abc.jpg"}' -H "Content-Type: application/json" https://cf-image-worker.sabimage.workers.dev/delete
 ```
 
-## 5. Client IDs & Analytics
+---
 
-Use the appropriate `client` parameter for your project to ensure analytics isolation:
+## Client Integration Examples
 
-*   **MuseFactory**: `musefactory`
-*   **Teemplot**: `teemplot`
-*   **UGlobalHorizons**: `uglobalhorizons`
-
-## 6. Troubleshooting
-
-*   **404 Not Found**: Check if the source `url` parameter is correct.
-*   **500 Upload Failed**: Check if the Worker has the correct R2 binding (`IMG_CACHE`).
-
-## 7. Deployment (Cloudflare Workers)
-
-### Deployment Steps
-1.  **Login**: `npx wrangler login`
-2.  **Deploy**: `npx wrangler deploy`
-
-Config is located in `workers/cf-image-worker/wrangler.toml`.
-Source code is in `workers/cf-image-worker/src/index.ts`.
+For specific code examples on how to integrate this into your React applications, see:
+[REACT_EXAMPLES.md](REACT_EXAMPLES.md)

@@ -13,6 +13,34 @@ function clamp(n: number, min: number, max: number) {
   return Math.min(Math.max(n, min), max)
 }
 
+function normalizeR2Key(raw: string): string {
+  let k = raw
+  for (let i = 0; i < 2; i++) {
+    try {
+      const decoded = decodeURIComponent(k)
+      if (decoded === k) break
+      k = decoded
+    } catch {
+      break
+    }
+  }
+  return k
+}
+
+function parseRangeHeader(rangeHeader: string | null): { offset: number; length?: number } | null {
+  if (!rangeHeader) return null
+  const m = /^bytes=(\d+)-(\d+)?$/.exec(rangeHeader.trim())
+  if (!m) return null
+  const start = Number(m[1])
+  const end = m[2] ? Number(m[2]) : undefined
+  if (!Number.isFinite(start) || start < 0) return null
+  if (end !== undefined) {
+    if (!Number.isFinite(end) || end < start) return null
+    return { offset: start, length: end - start + 1 }
+  }
+  return { offset: start }
+}
+
 function parseList(v?: string): Set<string> {
   if (!v) return new Set()
   return new Set(
@@ -49,7 +77,7 @@ function makeHeaders(contentType: string | null, ttlSeconds: number) {
   if (contentType) h.set('Content-Type', contentType)
   h.set('Cache-Control', `public, max-age=${ttlSeconds}`)
   h.set('Access-Control-Allow-Origin', '*')
-  h.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+  h.set('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, DELETE, OPTIONS')
   h.set('Access-Control-Allow-Headers', '*')
   h.set('Timing-Allow-Origin', '*')
   return h
@@ -66,6 +94,54 @@ export default {
 
     const url = new URL(req.url)
 
+    const streamFromR2 = async (keyRaw: string): Promise<Response> => {
+      if (!env.IMG_CACHE) {
+        return new Response('R2 binding IMG_CACHE not set', { status: 500, headers: makeHeaders('text/plain', 0) })
+      }
+
+      const key = normalizeR2Key(keyRaw)
+      const range = parseRangeHeader(req.headers.get('Range'))
+      const obj = await env.IMG_CACHE.get(key, range ? { range } : undefined)
+      if (!obj) {
+        return new Response('R2 Object Not Found', { status: 404, headers: makeHeaders('text/plain', 0) })
+      }
+
+      const contentType = obj.httpMetadata?.contentType || 'application/octet-stream'
+      const headers = makeHeaders(contentType, 60 * 60 * 24 * 30)
+      headers.set('Accept-Ranges', 'bytes')
+
+      if (range && obj.size !== undefined) {
+        const start = range.offset
+        const end = range.length ? start + range.length - 1 : obj.size - 1
+        headers.set('Content-Range', `bytes ${start}-${end}/${obj.size}`)
+        if (range.length) headers.set('Content-Length', String(range.length))
+        if (req.method === 'HEAD') return new Response(null, { status: 206, headers })
+        return new Response(obj.body as ReadableStream, { status: 206, headers })
+      }
+
+      if (req.method === 'HEAD') return new Response(null, { headers })
+      return new Response(obj.body as ReadableStream, { headers })
+    }
+
+    const putToR2 = async (keyRaw: string): Promise<Response> => {
+      if (!env.IMG_CACHE) {
+        return new Response('R2 binding IMG_CACHE not set', { status: 500, headers: makeHeaders('text/plain', 0) })
+      }
+      const key = normalizeR2Key(keyRaw)
+      if (!req.body) {
+        return new Response('Missing request body', { status: 400, headers: makeHeaders('text/plain', 0) })
+      }
+      const contentType = req.headers.get('Content-Type') || 'application/octet-stream'
+      await env.IMG_CACHE.put(key, req.body, { httpMetadata: { contentType } })
+      return new Response(
+        JSON.stringify({
+          key,
+          url: `${url.origin}/image?r2key=${encodeURIComponent(key)}`,
+        }),
+        { headers: makeHeaders('application/json', 0) },
+      )
+    }
+
     // === Upload Endpoint (Direct to R2) ===
     if (req.method === 'POST' && url.pathname === '/upload') {
       if (!env.IMG_CACHE) {
@@ -74,11 +150,13 @@ export default {
 
       try {
         const formData = await req.formData()
-        const file = formData.get('image') as File | null
+        // Allow 'file' or 'image' field
+        const fileEntry = formData.get('file') || formData.get('image')
+        const file = fileEntry as unknown as File | null
         const clientId = (formData.get('client') as string) || 'default'
 
         if (!file) {
-          return new Response('No image file provided', { status: 400, headers: makeHeaders('text/plain', 0) })
+          return new Response('No file provided', { status: 400, headers: makeHeaders('text/plain', 0) })
         }
 
         // Streaming Upload: Pass stream directly to R2
@@ -103,6 +181,35 @@ export default {
       } catch (err: any) {
         return new Response(`Upload failed: ${err.message}`, { status: 500, headers: makeHeaders('text/plain', 0) })
       }
+    }
+
+    // === Backward-compatible File Read Aliases ===
+    // GET/HEAD /api/files/<encodedKey>  -> stream from R2
+    if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname.startsWith('/api/files/')) {
+      const keyPart = url.pathname.slice('/api/files/'.length)
+      return streamFromR2(keyPart)
+    }
+
+    // GET/HEAD /api/videos/<key> -> stream from R2 (supports either "videos/<key>" or raw key)
+    if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname.startsWith('/api/videos/')) {
+      const keyPart = url.pathname.slice('/api/videos/'.length)
+      const normalized = normalizeR2Key(keyPart)
+      const key = normalized.includes('/') ? normalized : `videos/${normalized}`
+      return streamFromR2(key)
+    }
+
+    // PUT /api/videos/<key> -> store raw bytes to R2 (streaming; supports 500MB+ reliably)
+    if (req.method === 'PUT' && url.pathname.startsWith('/api/videos/')) {
+      const keyPart = url.pathname.slice('/api/videos/'.length)
+      const normalized = normalizeR2Key(keyPart)
+      const key = normalized.includes('/') ? normalized : `videos/${normalized}`
+      return putToR2(key)
+    }
+
+    // PUT /api/files/<key> -> store raw bytes to R2 (streaming)
+    if (req.method === 'PUT' && url.pathname.startsWith('/api/files/')) {
+      const keyPart = url.pathname.slice('/api/files/'.length)
+      return putToR2(keyPart)
     }
 
     // === Delete Endpoint ===
@@ -142,23 +249,6 @@ export default {
     let r2ObjectBody: ReadableStream | null = null;
     let r2ContentType = 'image/jpeg';
 
-    if (r2key && env.IMG_CACHE) {
-        // Fetch from R2 directly (internal)
-        const obj = await env.IMG_CACHE.get(r2key);
-        if (!obj) return new Response('R2 Object Not Found', { status: 404 });
-        r2ObjectBody = obj.body;
-        r2ContentType = obj.httpMetadata?.contentType || 'image/jpeg';
-        // We can't easily pass a stream to 'fetch' for image resizing service (it needs a URL).
-        // However, we can return the raw image if no resize params are present.
-        // Or, to resize R2 objects without public URLs, we need to serve it on a temp route or use a worker-to-worker fetch.
-        // For simplicity: We will assume R2 has a public domain OR we serve raw if not public.
-        
-        // Actually, Cloudflare Image Resizing supports `fetch(request)` where request body is the image.
-        // But that's for POST.
-        // Let's stick to the URL method for now to be safe with the current code structure.
-        // We will assume the user provides a full URL for 'src'.
-    }
-
     // Standard Image Resizing Logic
     const format = (url.searchParams.get('format') ?? env.DEFAULT_FORMAT ?? 'webp').toLowerCase()
     const quality = clamp(
@@ -174,20 +264,16 @@ export default {
     const height = clamp(Number(url.searchParams.get('height') || 0) || 0, 0, maxH) || undefined
 
     const allowedHosts = parseList(env.ALLOWED_HOSTS)
-    
-    // If using R2 Key, we need a way to resize it. 
-    // If we can't resize R2 streams easily without public URLs, let's just serve it raw if requested, or require public URL.
-    if (r2key && env.IMG_CACHE) {
-         const obj = await env.IMG_CACHE.get(r2key);
-         if (!obj) return new Response('Not Found', { status: 404 });
-         // If no resize needed, return raw
-         if (!width && !height && format === 'webp') { // defaults
-             return new Response(obj.body, { headers: { 'Content-Type': obj.httpMetadata?.contentType || 'image/jpeg' }})
-         }
-         // If resize needed, we need a URL. 
-         // Strategy: We can't resize private R2 objects easily in this specific setup without a public URL.
-         // FALLBACK: Return raw for now.
-         return new Response(obj.body, { headers: { 'Content-Type': obj.httpMetadata?.contentType || 'image/jpeg' }})
+
+    if (r2key) {
+      const key = normalizeR2Key(r2key)
+      const resp = await streamFromR2(key)
+      if (!resp.ok) return resp
+
+      const ct = resp.headers.get('Content-Type') || ''
+      if (ct.startsWith('video/')) return resp
+      if (!width && !height && format === 'webp') return resp
+      return resp
     }
 
     const sourceUrl = normalizeUrl(src)

@@ -21,8 +21,8 @@
     
     <form id="uploadForm">
         <div class="form-group">
-            <label>Select Image:</label>
-            <input type="file" name="image" accept="image/*" required />
+            <label>Select File (Image or Video):</label>
+            <input type="file" name="image" accept="image/*,video/*" required />
         </div>
         <div class="form-group">
             <label>Client ID:</label>
@@ -34,6 +34,7 @@
     <div id="result"></div>
     <h3>Preview (from Worker):</h3>
     <img id="preview" alt="Upload preview" />
+    <video id="videoPreview" controls style="display:none; max-width: 100%; border: 1px solid #ddd;"></video>
 
     <script>
         document.getElementById('uploadForm').addEventListener('submit', async (e) => {
@@ -41,6 +42,7 @@
             const formData = new FormData(e.target);
             const resultDiv = document.getElementById('result');
             const previewImg = document.getElementById('preview');
+            const videoPreview = document.getElementById('videoPreview');
             const btn = e.target.querySelector('button');
             
             btn.disabled = true;
@@ -48,6 +50,8 @@
             resultDiv.style.display = 'block';
             resultDiv.textContent = 'Sending request to Cloudflare...';
             previewImg.style.display = 'none';
+            videoPreview.style.display = 'none';
+            videoPreview.src = '';
 
             try {
                 // Use the newly deployed Worker URL
@@ -62,8 +66,14 @@
                     resultDiv.textContent = 'Success! Response:\n' + JSON.stringify(data, null, 2);
                     
                     if (data.url) {
-                        previewImg.src = data.url;
-                        previewImg.style.display = 'block';
+                        const isVideo = data.key.match(/\.(mp4|webm|mov|avi|mkv)$/i);
+                        if (isVideo) {
+                            videoPreview.src = data.url;
+                            videoPreview.style.display = 'block';
+                        } else {
+                            previewImg.src = data.url;
+                            previewImg.style.display = 'block';
+                        }
                     }
                 } catch {
                     resultDiv.textContent = 'Server Error (Not JSON):\n' + text;

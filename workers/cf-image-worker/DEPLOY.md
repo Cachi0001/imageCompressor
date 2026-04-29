@@ -30,12 +30,13 @@ That's it! Your service is live at:
 
 ## Step 3: Use It
 
-### Display Images (Fast & Compressed)
+### Display Images/Videos (Fast & Compressed)
 ```
 https://cf-image-worker.sabimage.workers.dev/image?url=https://mysite.com/pic.jpg&width=800
 ```
+(Videos are streamed directly without compression)
 
-### Upload Images (Direct & Fast)
+### Upload Files (Images & Videos)
 POST to: `https://cf-image-worker.sabimage.workers.dev/upload`
 (See Integration Guide for code examples)
 
