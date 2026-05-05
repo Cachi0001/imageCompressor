@@ -195,7 +195,17 @@ export default {
     // GET/HEAD /api/files/<encodedKey>  -> stream from R2
     if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname.startsWith('/api/files/')) {
       const keyPart = url.pathname.slice('/api/files/'.length)
-      return streamFromR2(keyPart)
+      const normalized = normalizeR2Key(keyPart)
+      const buckets: R2Bucket[] = []
+      if (env.IMG_CACHE) buckets.push(env.IMG_CACHE)
+      if (env.VID_CACHE) buckets.push(env.VID_CACHE)
+      if (buckets.length === 0) {
+        return new Response('R2 binding IMG_CACHE not set', { status: 500, headers: makeHeaders('text/plain', 0) })
+      }
+      if (normalized.includes('/')) {
+        return streamFromR2FirstMatch([normalized], buckets)
+      }
+      return streamFromR2FirstMatch([`files/${normalized}`, normalized], buckets)
     }
 
     // GET/HEAD /api/videos/<key> -> stream from R2 (supports either "videos/<key>" or raw key)
