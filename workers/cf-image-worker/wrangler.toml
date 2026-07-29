@@ -8,8 +8,12 @@ account_id = "95cf2d563e935370edd0213aa03cc92d"
 [vars]
 # Account ID for public URL construction
 ACCOUNT_ID = "95cf2d563e935370edd0213aa03cc92d"
-# Comma-separated list of allowed source hostnames. Leave empty to allow all.
-ALLOWED_HOSTS = ""
+# Comma-separated list of allowed source hostnames for image resizing. Leave empty to allow all.
+# Subdomains are automatically allowed (e.g. "example.com" also matches "*.example.com")
+ALLOWED_HOSTS = "avilexbiotech.com,avilexbiotech.vercel.app,teemplot.com,api.teemplot.com,themusefactoryng.com,uglobalhorizons.com,uglobalhorizons.vercel.app"
+# Comma-separated list of allowed origins (CORS) for upload and retrieve. Leave empty to allow all.
+# Subdomains are automatically allowed (e.g. "example.com" also matches "*.example.com")
+ALLOWED_ORIGINS = "avilexbiotech.com,avilexbiotech.vercel.app,teemplot.com,api.teemplot.com,themusefactoryng.com,uglobalhorizons.com,uglobalhorizons.vercel.app"
 # Defaults used when query params are missing
 DEFAULT_QUALITY = "80"
 DEFAULT_FORMAT = "webp"

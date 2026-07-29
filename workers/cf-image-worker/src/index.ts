@@ -2,6 +2,7 @@ export interface Env {
   IMG_CACHE?: R2Bucket
   VID_CACHE?: R2Bucket
   ALLOWED_HOSTS?: string
+  ALLOWED_ORIGINS?: string
   DEFAULT_QUALITY?: string
   DEFAULT_FORMAT?: string
   USE_R2_CACHE?: string
@@ -61,6 +62,29 @@ function normalizeUrl(u: string): URL | null {
   }
 }
 
+function getAllowedOrigin(origin: string | null, allowedOrigins: Set<string>): string | null {
+  if (!origin) return null
+  if (allowedOrigins.size === 0) return '*'
+  try {
+    const url = new URL(origin)
+    if (isHostAllowed(url.hostname, allowedOrigins)) return origin
+    return null
+  } catch {
+    return null
+  }
+}
+
+function isHostAllowed(hostname: string, allowedSet: Set<string>): boolean {
+  if (allowedSet.size === 0) return true
+  const h = hostname.toLowerCase()
+  if (allowedSet.has(h)) return true
+  // Subdomain matching: "example.com" also matches "*.example.com"
+  for (const allowed of allowedSet) {
+    if (h.endsWith('.' + allowed)) return true
+  }
+  return false
+}
+
 function cacheKey(url: URL, params: Record<string, string | number | undefined>) {
   const parts = [
     url.toString(),
@@ -73,24 +97,39 @@ function cacheKey(url: URL, params: Record<string, string | number | undefined>)
   return parts.join('&')
 }
 
-function makeHeaders(contentType: string | null, ttlSeconds: number) {
+function makeHeaders(contentType: string | null, ttlSeconds: number, allowedOrigin: string | null = '*'): Headers {
   const h = new Headers()
   if (contentType) h.set('Content-Type', contentType)
   h.set('Cache-Control', `public, max-age=${ttlSeconds}`)
-  h.set('Access-Control-Allow-Origin', '*')
+  if (allowedOrigin) {
+    h.set('Access-Control-Allow-Origin', allowedOrigin)
+  }
   h.set('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, DELETE, OPTIONS')
   h.set('Access-Control-Allow-Headers', '*')
-  h.set('Timing-Allow-Origin', '*')
+  h.set('Timing-Allow-Origin', allowedOrigin || '*')
   return h
 }
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const allowedOrigins = parseList(env.ALLOWED_ORIGINS)
+    const origin = req.headers.get('Origin')
+    const allowedOrigin = getAllowedOrigin(origin, allowedOrigins)
+
     // Handle CORS preflight
     if (req.method === 'OPTIONS') {
-        return new Response(null, {
-            headers: makeHeaders(null, 0)
-        });
+        const headers = new Headers()
+        if (allowedOrigin) headers.set('Access-Control-Allow-Origin', allowedOrigin)
+        headers.set('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, DELETE, OPTIONS')
+        headers.set('Access-Control-Allow-Headers', '*')
+        headers.set('Timing-Allow-Origin', allowedOrigin || '*')
+        headers.set('Access-Control-Max-Age', '86400')
+        return new Response(null, { headers })
+    }
+
+    // Reject requests from unauthorized origins
+    if (origin && !allowedOrigin) {
+      return new Response('Origin not allowed', { status: 403, headers: { 'Content-Type': 'text/plain' } })
     }
 
     const url = new URL(req.url)
@@ -376,7 +415,7 @@ export default {
     if (!sourceUrl) {
       return new Response('Invalid source URL', { status: 400 })
     }
-    if (allowedHosts.size > 0 && !allowedHosts.has(sourceUrl.hostname.toLowerCase())) {
+    if (allowedHosts.size > 0 && !isHostAllowed(sourceUrl.hostname, allowedHosts)) {
       return new Response('Source host not allowed', { status: 403 })
     }
 
