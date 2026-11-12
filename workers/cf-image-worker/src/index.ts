@@ -29,6 +29,24 @@ function normalizeR2Key(raw: string): string {
   return k
 }
 
+// Widths the worker will serve from pre-generated variants (variants/<w>/<key>.webp).
+// Anything outside this list is not a valid variant request.
+const VARIANT_WIDTHS = [400, 800, 1200]
+
+// Hardened key check: R2 keys are flat, but reject traversal/absolute/empty
+// keys at the boundary anyway (defense in depth).
+function isSafeR2Key(key: string): boolean {
+  return (
+    !!key &&
+    key.length <= 1024 &&
+    key !== '.' &&
+    key !== '..' &&
+    !key.startsWith('/') &&
+    !key.includes('..') &&
+    !key.includes('\\')
+  )
+}
+
 function parseRangeHeader(rangeHeader: string | null): { offset: number; length?: number } | null {
   if (!rangeHeader) return null
   const m = /^bytes=(\d+)-(\d+)?$/.exec(rangeHeader.trim())
@@ -139,6 +157,7 @@ export default {
       for (const bucket of buckets) {
         for (const candidate of candidateKeys) {
           const key = normalizeR2Key(candidate)
+          if (!isSafeR2Key(key)) continue
           const obj = await bucket.get(key, range ? { range } : undefined)
           if (!obj) continue
 
@@ -396,18 +415,41 @@ export default {
 
     if (r2key) {
       const key = normalizeR2Key(r2key)
+      if (!isSafeR2Key(key)) {
+        return new Response('Invalid r2key', { status: 400, headers: makeHeaders('text/plain', 0) })
+      }
+
       const buckets: R2Bucket[] = []
       if (env.IMG_CACHE) buckets.push(env.IMG_CACHE)
       if (env.VID_CACHE) buckets.push(env.VID_CACHE)
       if (buckets.length === 0) {
         return new Response('R2 binding IMG_CACHE not set', { status: 500, headers: makeHeaders('text/plain', 0) })
       }
-      const resp = await streamFromR2FirstMatch([key], buckets)
-      if (!resp.ok) return resp
 
-      const ct = resp.headers.get('Content-Type') || ''
-      if (ct.startsWith('video/')) return resp
-      if (!width && !height && format === 'webp') return resp
+      // Serve pre-generated width variants when a size is requested
+      // (variants/<w>/<key>.webp). If the variant doesn't exist yet, fall back
+      // to the original so nothing breaks before migration. Rollback = delete
+      // the variants/ prefix (or remove ?w= from clients).
+      const requestedWidth = Number(url.searchParams.get('w') || url.searchParams.get('width') || 0)
+      const variantWidth = VARIANT_WIDTHS.includes(requestedWidth) ? requestedWidth : null
+      if (variantWidth && env.IMG_CACHE) {
+        const variantKey = `variants/${variantWidth}/${key}.webp`
+        const cache = caches.default
+        const cached = await cache.match(variantKey)
+        if (cached) return cached
+
+        const variantObj = await env.IMG_CACHE.get(variantKey)
+        if (variantObj) {
+          const headers = makeHeaders('image/webp', 60 * 60 * 24 * 365, allowedOrigin)
+          headers.set('Cache-Control', 'public, max-age=31536000, immutable')
+          const resp = new Response(variantObj.body as ReadableStream, { headers })
+          ctx.waitUntil(cache.put(variantKey, resp.clone()))
+          return resp
+        }
+        // Variant not found: continue to the original below.
+      }
+
+      const resp = await streamFromR2FirstMatch([key], buckets)
       return resp
     }
 
