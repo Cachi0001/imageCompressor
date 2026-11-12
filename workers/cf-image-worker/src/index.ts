@@ -434,8 +434,10 @@ export default {
       const variantWidth = VARIANT_WIDTHS.includes(requestedWidth) ? requestedWidth : null
       if (variantWidth && env.IMG_CACHE) {
         const variantKey = `variants/${variantWidth}/${key}.webp`
+        // Cache API needs an absolute URL, not a bare key string.
+        const cacheUrl = new URL(variantKey, url.origin).toString()
         const cache = caches.default
-        const cached = await cache.match(variantKey)
+        const cached = await cache.match(cacheUrl)
         if (cached) return cached
 
         const variantObj = await env.IMG_CACHE.get(variantKey)
@@ -443,7 +445,7 @@ export default {
           const headers = makeHeaders('image/webp', 60 * 60 * 24 * 365, allowedOrigin)
           headers.set('Cache-Control', 'public, max-age=31536000, immutable')
           const resp = new Response(variantObj.body as ReadableStream, { headers })
-          ctx.waitUntil(cache.put(variantKey, resp.clone()))
+          ctx.waitUntil(cache.put(cacheUrl, resp.clone()))
           return resp
         }
         // Variant not found: continue to the original below.
